@@ -3,15 +3,20 @@ import random
 from multiprocessing import Lock, Condition, Process
 from multiprocessing import Value, Manager
 
-NCAR_N = 20 #Number of cars heading North
-NCAR_S = 20 #Number of cars heading South
+NCAR_N = 50 #Number of cars heading North
+NCAR_S = 50 #Number of cars heading South
 NPED = 10 #Number of pedestrian
+
+#The next two variables are optionals
+
+#max_car = 5 #Maximum number of cars that can cross the bridge at the same time
+#max_ped = 5 #Maximum number of pedestrians that can cross the bridge at the same time
 
 TIME_CARS_NORTH = 0.5 #A new car enters each 0.5s
 TIME_CARS_SOUTH = 0.5 #A new car enters each 0.5s
-TIME_PED = 1 #A new pedestrian enters each 5s
-TIME_IN_BRIDGE_CARS = (1.5, 1) #A car takes 1s crossing
-TIME_IN_BRIDGE_PEDESTRIAN = (2.5, 2) #A pedestrian takes 10s crossing
+TIME_PED = 2 #A new pedestrian enters each 2s
+TIME_IN_BRIDGE_CARS = (1, 0.5) # normal 1s, 0.5s
+TIME_IN_BRIDGE_PEDESTRIAN = (5, 2.5) #normal 5s, 2.5s
 
 class Monitor():
     def __init__(self):
@@ -19,11 +24,7 @@ class Monitor():
         self.patata = Value('i', 0) #Number of calls to the monitor made by the processes
 		
         manager = Manager()
-        self.puente = manager.list() #List to see who is crossing at every moment
-		
-        self.n_north = Value('i', 0) #Number of cars heading North crossing 
-        self.n_south = Value('i', 0) #Number of cars heading South crossing 
-        self.n_ped = Value('i', 0) #Number of pedestrians crossing 
+        self.puente = manager.list() #List to see who is crossing at every moments
 		
         self.waiting_N = Value('i', 0) #Number of cars heading North waiting to cross 
         self.waiting_S = Value('i', 0) #Number of cars heading South waiting to cross 
@@ -44,28 +45,36 @@ class Monitor():
 		
 
 		
-	#To be more realistic, taking into account the size of the bridge, we only allow one car at the bridge. Obviously, cars and pedestrians cannot cross at the same time. Idem for cars in different directions
+#The system designed in this solution for the problem of the bridge is based on three different processes, one for the cars
+#heading north, other for the cars heading south and other for pedestrians. The idea is that any car or pedestrian who wants
+#to cross first must wait, but for waiting needs to verify a condition variable that only allows him to start waiting if
+#nobody of the same type is crossing at that moment or if nobody of the other types is waiting to cross
+
+#When a process is waiting then it has to verify a condition variable to start crossing, which allows him to start crossing 
+#nobody of the other types is crossing
+
+#Another important aspect is that, due to the fact that we are working on a concurrent system, the order of the cars that start crossing dont't has to be the same that the order of the cars thar leaves
 	
-	
-	#Como el proceso de cada coche no tiene acciones atómicas podría ocurrir que se añaden a la lista en orden distinto el append y el delay, por lo que el primer coche que sale del puente no tiene por que ser el primero que entró.
+#There is not a limit for the number of cars or pedestrians that can cross the bridge at the same time. If we want it
+#it is enough to uncommented the part in the condition variables_
 	
     def can_N(self) -> bool:
-        return self.n_south.value == 0 and self.n_ped.value == 0 
+        return self.n_south.value == 0 and self.n_ped.value == 0 #and self.n_north.value <= max_car
 		
     def can_wait_N(self) -> bool:
-        return self.n_north.value == 0 or self.waiting_S.value+self.waiting_P.value == 0
+        return self.n_north.value == 0 or (self.waiting_S.value== 0 and self.waiting_P.value == 0)
 		
     def can_S(self) -> bool:
-        return self.n_north.value == 0 and self.n_ped.value == 0 
+        return self.n_north.value == 0 and self.n_ped.value == 0 #and self.n_south.value <= max_car
 		
     def can_wait_S(self) -> bool:
-        return self.n_south.value == 0 or self.waiting_N.value+self.waiting_P.value == 0
+        return self.n_south.value == 0 or (self.waiting_N.value == 0 and self.waiting_P.value == 0)
 		
     def can_P(self) -> bool:
-        return self.n_north.value == 0 and self.n_south.value == 0 
+        return self.n_north.value == 0 and self.n_south.value == 0 #and self.n_ped.value <= max_ped
 	
     def can_wait_P(self) -> bool:
-        return self.n_ped.value == 0 or self.waiting_N.value+self.waiting_S.value == 0
+        return self.n_ped.value == 0 or (self.waiting_N.value == 0 and self.waiting_S.value == 0)
 		
     def wants_enter_car_N(self, cid) -> None:
         with self.mutex:
@@ -75,10 +84,10 @@ class Monitor():
             self.pass_N.wait_for(self.can_N)
             self.waiting_N.value -= 1
             self.n_north.value += 1
+            self.puente.append(f'{cid}_N')
             print(f'car {cid}_N enters the bridge. {self}')
             self.wait_S.notify_all()
             self.wait_P.notify_all()
-            self.puente.append(f'{cid}_N')
 		
     def leaves_car_N(self, cid) -> None:
         with self.mutex:
@@ -89,6 +98,7 @@ class Monitor():
             if self.n_north.value == 0:
                 self.pass_P.notify_all()  
                 self.pass_S.notify_all()
+                self.wait_N.notify_all()
 		
     def wants_enter_car_S(self, cid) -> None:
         with self.mutex:
@@ -98,10 +108,11 @@ class Monitor():
             self.pass_S.wait_for(self.can_S)
             self.waiting_S.value -= 1
             self.n_south.value += 1
+            self.puente.append(f'{cid}_S')
             print(f'car {cid}_S enters the bridge. {self}')
             self.wait_P.notify_all()
             self.wait_S.notify_all()
-            self.puente.append(f'{cid}_S')
+
 		
     def leaves_car_S(self, cid) -> None:
         with self.mutex:
@@ -112,6 +123,7 @@ class Monitor():
             if self.n_south.value == 0:
                 self.pass_N.notify_all()
                 self.pass_P.notify_all()
+                self.wait_S.notify_all()
 		
     def wants_enter_pedestrian(self, pid) -> None:
         with self.mutex:
@@ -121,10 +133,10 @@ class Monitor():
             self.pass_P.wait_for(self.can_P)
             self.waiting_P.value -= 1
             self.n_ped.value += 1
+            self.puente.append(f'{pid}')		
             print(f'pedestrian {pid} enters the bridge. {self}')
             self.wait_N.notify_all()
-            self.wait_S.notify_all()
-            self.puente.append(f'{pid}')		
+            self.wait_S.notify_all
 		
     def leaves_pedestrian(self, pid) -> None:
         with self.mutex:
@@ -135,6 +147,7 @@ class Monitor():
             if self.n_ped.value == 0:
                 self.pass_N.notify_all()
                 self.pass_S.notify_all()
+                self.wait_P.notify_all()
 	
     def __repr__(self) -> str:
         return f'Monitor: {self.patata.value}. Crossing the bridge: {self.puente}'
@@ -165,7 +178,7 @@ def car_S(cid: int, monitor: Monitor) -> None:
 	print(f'car {cid}_S wants to cross. {monitor}')
 	monitor.wants_enter_car_S(cid)
 	delay_car_south()
-	print(f'car {cid}_S leaving th bridge. {monitor}')
+	print(f'car {cid}_S leaving the bridge. {monitor}')
 	monitor.leaves_car_S(cid)
 	
 def pedestrian(pid: int, monitor: Monitor) -> None:
